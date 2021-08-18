@@ -1,0 +1,151 @@
+_schema-version: '3.2'
+ID: ubineticastlen
+version: 0.0.1
+
+parameters:
+  enable-parallel-deployments: true
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm install --production
+        - npx -p @sap/cds-dk cds build --production
+#        - npx rimraf gen/db/src/gen/data # uncomment this line to prevent loading of initial data which is only relevant for dev/test deployments 
+#        - npx rimraf gen/db/src/gen/csv  # uncomment this line unless db/csv folder has been used for config/control table data which is entirely managed by the developer and never changed by the app
+
+modules:
+
+  # --------------------- SERVER MODULE ------------------------
+  - name: ubineticastlen-srv
+  # ------------------------------------------------------------
+    type: nodejs
+    path: gen/srv
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 3000M
+      disk-quota: 2048M
+    properties:
+      ApplicationInterfaceKey: saptest0
+      APIKeyHubSandbox: AjMKyfE8jnWaDZTMRjWQzXHbxDhZ45Pm
+    requires:
+      - name: ubineticastlen-uaa
+      - name: ubineticastlen-dest
+      - name: ubineticastlen-logging
+      - name: ubineticastlen-registry
+      - name: ubineticastlen-sm
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+
+
+  # ------------------ APP ROUTER MODULE -----------------------
+  - name: ubineticastlen
+  # ------------------------------------------------------------
+    type: approuter.nodejs
+    path: app
+    parameters:
+      memory: 512M
+      disk-quota: 2048M
+    properties:
+      TENANT_HOST_PATTERN: '^(.*)-${space}-${app-name}.${default-domain}'
+    requires:
+      - name: ubineticastlen-uaa
+      - name: srv-api
+        group: destinations
+        properties:
+          name: srv
+          url: ~{srv-url}
+          timeout: 60000
+          forwardAuthToken: true
+      - name: ubineticastlen-logging
+    provides:
+      - name: app_api
+        properties:
+          url: ${default-url}
+          application: ${app-name}
+
+
+resources:
+  # ----------------------- UAA SERVICE ------------------------
+  - name: ubineticastlen-uaa
+  # ------------------------------------------------------------
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      xsuaa-app: ${space}-~{app_api/application}
+      config:
+        xsappname: ${xsuaa-app}
+    properties:
+      XSAPPNAME: ${xsuaa-app}
+    requires: 
+      - name: app_api
+
+  # -------------------- DESTINATION SERVICE -------------------
+  - name: ubineticastlen-dest
+  # ------------------------------------------------------------
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: destination
+      service-plan: lite
+      config:
+        init_data:
+          subaccount:
+            existing_destinations_policy: update
+            destinations:
+              - Name: ubineticastlen-API_SALES_ORDER_SRV
+                Description: SAP S/4HANA Cloud Sales Order (A2X)
+                URL: https://sandbox.api.sap.com
+                Type: HTTP
+                ProxyType: Internet
+                Authentication: NoAuthentication
+                HTML5.DynamicDestination: true
+
+
+
+
+
+  # --------------------- REGISTRY SERVICE ---------------------
+  - name: ubineticastlen-registry
+  # ------------------------------------------------------------
+    type: org.cloudfoundry.managed-service
+    requires:
+      - name: ubineticastlen-uaa
+    parameters:
+      service: saas-registry
+      service-plan: application
+      config:
+        xsappname: ~{ubineticastlen-uaa/XSAPPNAME}
+        appName: ubineticastlen
+        displayName: 'MTA SaaS App'
+        description: 'Multitenant Business Application'
+        category: 'SaaS Multitenant Apps'
+        appUrls:
+          onSubscription: https://${org}-${space}-ubineticastlen-srv.${default-domain}/mtx/v1/provisioning/tenant/{tenantId}
+          getDependencies: https://${org}-${space}-ubineticastlen-srv.${default-domain}/mtx/v1/provisioning/dependencies
+
+  # ------------------- SERVICE MANAGER SERVICE ----------------
+  - name: ubineticastlen-sm
+  # ------------------------------------------------------------
+    type: org.cloudfoundry.managed-service
+    requires:
+     - name: ubineticastlen-uaa
+    parameters:
+       service: service-manager
+       service-plan: container
+       polling_timeout_seconds: 240
+       config:
+         acquireTimeoutMillis: max
+         polling_timeout_seconds: 480
+
+  # ---------------- APPLICATION LOGGING SERVICE ---------------
+  - name: ubineticastlen-logging
+  # ------------------------------------------------------------
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: application-logs
+      service-plan: lite
+
